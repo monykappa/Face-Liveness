@@ -50,8 +50,9 @@ def detect_and_crop_face(img, return_bbox=False, for_display=False):
         Cropped face image or (cropped_face, bbox) if return_bbox=True.
     """
     try:
-        faces = DeepFace.extract_faces(img, detector_backend='ssd', enforce_detection=False)
+        faces = DeepFace.extract_faces(img, detector_backend='ssd', enforce_detection=True)
         if not faces:
+            print("No faces found")
             return None if not return_bbox else (None, None)
             
         # Sort faces by area (largest first)
@@ -60,8 +61,12 @@ def detect_and_crop_face(img, return_bbox=False, for_display=False):
         largest_face = faces_sorted[0]['face']
         bbox = faces_sorted[0]['facial_area']
         
-        # Validate face
-        if largest_face is None or largest_face.shape[0] == 0 or largest_face.shape[1] == 0:
+        # Validate face - make sure it's a reasonable size
+        if (largest_face is None or 
+            largest_face.shape[0] == 0 or 
+            largest_face.shape[1] == 0 or
+            bbox['w'] < 50 or bbox['h'] < 50):  # Minimum face size check
+            print("Face too small or invalid")
             return None if not return_bbox else (None, None)
             
         # Normalize if image is float [0,1]
@@ -128,11 +133,28 @@ def assess_image_quality(image):
 
 def load_model(checkpoint_path, device):
     """
-    Load the PixelWise model from checkpoint.
+    Load the PixelWise model from a checkpoint for inference.
+    If quantized keys are detected, convert the model to a quantized version.
     """
-    model = PixelWise(pretrained=True).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+    # Load checkpoint and extract state dict
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+
+    # Check if the state dict is quantized (look for typical quantized keys)
+    if any("scale" in k for k in state_dict.keys()):
+        print("Detected quantized model state_dict. Converting model for quantized inference.")
+        # Instantiate the FP32 model without pretrained weights
+        model_fp32 = PixelWise(pretrained=False).to(device)
+        model_fp32.eval()
+        # Convert the model to a quantized version
+        model = torch.quantization.convert(model_fp32, inplace=False)
+    else:
+        model = PixelWise(pretrained=True).to(device)
+    
+    # Load state dict (use strict=False to account for any key differences)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
+    print(f"Model loaded from {checkpoint_path}")
     return model
 
 def get_predict(mask, label, threshold=0.7, score_type='combined'):
@@ -152,20 +174,30 @@ def get_predict(mask, label, threshold=0.7, score_type='combined'):
 def predict_frame(frame, model, transform, device, threshold=0.7):
     """
     Process a frame to detect face and predict spoof vs. live using a specific threshold.
+    Returns None if no valid face is detected.
     """
     # Get a face for display (keeping BGR format)
     display_result = detect_and_crop_face(frame, return_bbox=True, for_display=True)
     display_face = None
-    if display_result and display_result[0] is not None:
-        display_face, _ = display_result
+    bbox = None
+    
+    if display_result is None or display_result[0] is None:
+        # No face detected, return early
+        return None
+    
+    display_face, bbox = display_result
     
     # Get a face for model processing (converted to RGB format)
     result = detect_and_crop_face(frame, return_bbox=True)
     if result is None or result[0] is None:
-        return None, None, None, None, None, None, None
+        return None
         
     cropped_face, bbox = result
     
+    # Extra validation - make sure we have a valid face
+    if cropped_face is None or bbox is None:
+        return None
+        
     # Assess face image quality
     quality_score, quality_metrics = assess_image_quality(cropped_face)
     
@@ -210,7 +242,7 @@ class MultiThresholdManager:
         # Create directory structure
         for threshold in thresholds:
             threshold_str = f"{threshold:.2f}".replace('.', '_')
-            base_dir = f"output/threshold_{threshold_str}"
+            base_dir = f"output/output_v2/threshold_{threshold_str}"
             ensure_dir(base_dir)
             self.base_dirs[threshold] = base_dir
             
@@ -223,6 +255,9 @@ class MultiThresholdManager:
             self._initialize_results_file(results_file)
             
             print(f"Threshold {threshold}: Results will be saved to {base_dir}")
+        
+        # Debug flags
+        self.debug_mode = True
     
     def _initialize_results_file(self, file_path):
         """Create and initialize a results log file with headers"""
@@ -250,13 +285,27 @@ class MultiThresholdManager:
             Dictionary of results keyed by threshold value
         """
         # Detect and crop face once (shared across all thresholds)
+        if self.debug_mode:
+            print("Starting face detection...")
+            
         result = predict_frame(frame, self.model, self.transform, self.device)
         
-        if result[0] is None:  # No face detected
+        if result is None or result[0] is None:  # No face detected
+            if self.debug_mode:
+                print("No face detected in frame")
             return None
         
         # Unpack results
         _, score_value, mask, cropped_face_rgb, bbox, quality_score, display_face = result
+        
+        # Double check that we have a valid face
+        if cropped_face_rgb is None or bbox is None:
+            if self.debug_mode:
+                print("Invalid face data after prediction")
+            return None
+            
+        if self.debug_mode:
+            print(f"Face detected with quality score: {quality_score:.2f}")
         
         # Process with each threshold
         threshold_results = {}
@@ -305,12 +354,12 @@ class MultiThresholdManager:
 
 if __name__ == "__main__":
     # Configuration & Initialization
-    checkpoint_path = "best_model.pth"
+    checkpoint_path = "quantized_model.pth"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     transform = transforms.Compose([transforms.ToTensor()])
     
     # Define thresholds to evaluate
-    thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
+    thresholds = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9]
     
     # Load the trained model
     model = load_model(checkpoint_path, device)
@@ -356,10 +405,9 @@ if __name__ == "__main__":
         
         # Process only every n-th frame and when motion is low
         frame_count += 1
-        if frame_count % process_every_n_frames != 0:
-            # Skip this frame but still display with previous results
-            pass
-        else:
+        process_this_frame = False
+        
+        if frame_count % process_every_n_frames == 0:
             # Check for motion
             if prev_frame is not None:
                 gray1 = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
@@ -372,6 +420,11 @@ if __name__ == "__main__":
             # Process frame if not skipping
             if not skip_frame:
                 results = threshold_manager.process_frame(frame)
+                
+                # Add a message when face is not detected
+                if results is None:
+                    cv2.putText(frame, "No face detected", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             else:
                 results = None
         
