@@ -102,8 +102,8 @@ def predict(image_path, model, transform, device):
 
 if __name__ == "__main__":
     # Define checkpoint path and single image path
-    checkpoint_path = "quantized_model.pth"
-    image_path = "image1.png"  # specify the image path to process
+    checkpoint_path = "best_model2.pth"
+    image_path = "images/image.png"  # specify the image path to process
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Use the same transform as training for consistency

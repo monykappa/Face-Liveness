@@ -3,3 +3,6 @@ best_model.pth
 images
 best_model1.pth
 quantized_model.pth
+best_model2.pth
+best_model3.pth
+best_model5.pt

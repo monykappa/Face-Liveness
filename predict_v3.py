@@ -153,7 +153,8 @@ class LivenessDetector:
         return model
 
 if __name__ == "__main__":
-    checkpoint = "quantized_model.pth"
+    checkpoint = "best_model2.pth"
+    # checkpoint = "quantized_model.pth"
     thresholds = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9]
     output_folder = "output/output_v3"
     detector = LivenessDetector(checkpoint, thresholds)

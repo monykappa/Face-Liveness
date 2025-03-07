@@ -354,7 +354,7 @@ class MultiThresholdManager:
 
 if __name__ == "__main__":
     # Configuration & Initialization
-    checkpoint_path = "quantized_model.pth"
+    checkpoint_path = "best_model2.pth"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     transform = transforms.Compose([transforms.ToTensor()])
     
